@@ -18,23 +18,32 @@ class TransitLandWrapper {
 		return fetch(url, {headers: {apikey: this.apikey}});
 	}
 	
-	async getOne(name, params) {
-		let url = this.makeURL(name, params);
+	async getFullPage(name, params, path) {
+		if (!path) { path = name; }
+		let url = this.makeURL(path, params);
 		const resp = await this.fetchWithKey(url);
-		const respObj = await resp.json();
-		return respObj[name][0];
+		return await resp.json();
+	}
+
+	async getOnePage(name, params, path, limit = 100) {
+		params["limit"] = limit;
+		return (await this.getFullPage(name, params, path))[name];
 	}
 	
-	async getAllPages(name, params, limit = 100) {
-		let url = this.makeURL(name, params);
-		console.log(url);
+	async getOne(name, params, path) {
+		return (await this.getOnePage(name, params, path))[0];
+	}
+	
+	async getAllPages(name, params, path, limit = 100) {
 		params["limit"] = limit;
-
 		const fullArray = [];
 		
+		const respObj = await this.getFullPage(name, params, path);
+		fullArray.push(...respObj[name]);
+		let url = Object.hasOwn(respObj, "meta") ? respObj.meta.next : null;
+		
 		while (url) {
-			const resp = await this.fetchWithKey(url);
-			const respObj = await resp.json();
+			const respObj = await (await this.fetchWithKey(url)).json();
 			fullArray.push(...respObj[name]);
 			url = Object.hasOwn(respObj, "meta") ? respObj.meta.next : null;
 		}
@@ -42,9 +51,10 @@ class TransitLandWrapper {
 		return fullArray;
 	}
 	
-	// Can't get ALL stops on the routes as yet
 	async fetchStopsAndRoutes(minLon, maxLon, minLat, maxLat, {
 		derivedProductNotForbidden = true,
+		includeRefTrip = true,
+		tripIndex = 0
 		// pretty sure that this is the only one that matters because I'm not adapting the feed itself
 	} = {}) {
 		const params = {
@@ -61,6 +71,8 @@ class TransitLandWrapper {
 		// than routes --> stops
 		
 		const stops = await this.getAllPages("stops", params);
+		console.log(`Fetched ${stops.length} stops`);
+		
 		const routeIds = new Set();
 		for (let stop of stops) {
 			for (let {route} of stop.route_stops) {
@@ -69,11 +81,23 @@ class TransitLandWrapper {
 		}
 		
 		const routes = [];
+		let i = 0;
 		for (let routeId of routeIds) {
-			routes.push(await this.getOne("routes", {
-				id: routeId,
-				include_stops: true
-			}));
+			console.log(`Fetching route ${++i} of ${routeIds.size}`);
+			
+			const route = await this.getOne("routes", {
+				id: routeId
+			})
+			console.log("Fetched route");
+			
+			if (includeRefTrip) {
+				const routePath = `routes/${routeId}/trips`;
+				const allTrips = await this.getOnePage("trips", {}, routePath);
+				route.refTrip = await this.getOne("trips", {id: allTrips[tripIndex].id}, routePath);
+				console.log("Fetched trip");
+			}
+			
+			routes.push(route);
 		}
 
 		return {stops, routes};
@@ -115,19 +139,31 @@ class TransitLandWrapper {
 		const stopLocations = {};
 		for (let stop of collapsed.values()) {
 			const [lon, lat] = stop.geometry.coordinates;
-			stopLocations[stop.stop_name] = [lat, lon];
+			
+			stopLocations[stop.id] = {
+				name: stop.stop_name,
+				lon, lat
+			}
 		}
-		
-		window.collapsed = collapsed;
-		
+
 		const routeStops = {};
 		for (let route of routes) {
+			
+			let ids;
+			if (route.refTrip) {
+				ids = route.refTrip.stop_times.toSorted((a, b) => (a.stop_sequence - b.stop_sequence)).map((s) => (s.stop.id))
+			} else {
+				ids = route.route_stops.map((s) => (s.stop.id))
+			}
+
 			const thisStops = [];
-			for (let {stop} of route.route_stops) {
-				if (collapsed.has(stop.id)) {
-					thisStops.push(collapsed.get(stop.id).stop_name);
+			
+			for (let id of ids) {
+				if (collapsed.has(id)) {
+					thisStops.push(collapsed.get(id).id);
 				}
 			}
+			
 			routeStops[route.route_long_name ?? route.route_short_name ?? route.onestop_id] = thisStops;
 		}
 		
